@@ -3,7 +3,6 @@ const router = express.Router();
 const LeadScraper = require('../scrapers/leadScraper');
 
 // ── POST /api/scrape ─────────────────────────────────────────────────────────
-// Scrape one or more URLs. Auto-detects listing pages vs single business.
 router.post('/scrape', async (req, res) => {
   const { urls } = req.body;
   if (!urls || !Array.isArray(urls) || urls.length === 0)
@@ -31,7 +30,6 @@ router.post('/scrape', async (req, res) => {
 });
 
 // ── POST /api/analyze ────────────────────────────────────────────────────────
-// Fast: detect state/city filter links on the page without a full scrape.
 router.post('/analyze', async (req, res) => {
   const { url } = req.body;
   if (!url) return res.status(400).json({ error: 'Provide a URL.' });
@@ -48,25 +46,41 @@ router.post('/analyze', async (req, res) => {
 });
 
 // ── POST /api/scrape-states-stream ───────────────────────────────────────────
-// SSE stream: scrapes each state page one-by-one and pushes results live.
-// Fixes the 29-state timeout — client receives data as each state finishes.
+// SSE stream — supports both link-based and dropdown-based state scraping.
+//
+// Link-based payload:  { stateLinks: [{label, href}, ...] }
+// Dropdown payload:    { type:'dropdown', url, stateSelector, stateSelectorCSS,
+//                        searchSelector, stateOptions: [{value, label}, ...] }
 router.post('/scrape-states-stream', async (req, res) => {
-  const { stateLinks } = req.body;
-  if (!stateLinks || !stateLinks.length)
-    return res.status(400).json({ error: 'Provide stateLinks array.' });
+  const {
+    type,
+    stateLinks,
+    stateOptions,
+    url,
+    stateSelector,
+    stateSelectorCSS,
+    searchSelector,
+  } = req.body;
 
-  // SSE headers — keep connection alive for as long as scraping takes
+  const isDropdown = type === 'dropdown';
+  const items = isDropdown ? stateOptions : stateLinks;
+
+  if (!items || !items.length)
+    return res.status(400).json({ error: 'Provide stateLinks or stateOptions array.' });
+  if (isDropdown && !url)
+    return res.status(400).json({ error: 'Provide url for dropdown-type scraping.' });
+
+  // SSE headers
   res.setHeader('Content-Type', 'text/event-stream');
   res.setHeader('Cache-Control', 'no-cache');
   res.setHeader('Connection', 'keep-alive');
-  res.setHeader('X-Accel-Buffering', 'no'); // disable nginx buffering
+  res.setHeader('X-Accel-Buffering', 'no');
   res.flushHeaders();
 
   const send = obj => {
     if (!res.writableEnded) res.write(`data: ${JSON.stringify(obj)}\n\n`);
   };
 
-  // Keep-alive ping every 20s so the connection doesn't drop
   const ping = setInterval(() => {
     if (!res.writableEnded) res.write(': ping\n\n');
   }, 20000);
@@ -77,19 +91,30 @@ router.post('/scrape-states-stream', async (req, res) => {
   try {
     await scraper.init();
 
-    for (let i = 0; i < stateLinks.length; i++) {
-      if (res.writableEnded) break; // client disconnected
+    for (let i = 0; i < items.length; i++) {
+      if (res.writableEnded) break;
 
-      const link = stateLinks[i];
-      send({ type: 'start', state: link.label, index: i + 1, total: stateLinks.length });
+      const item = items[i];
+      const label = item.label || item.href || `Item ${i + 1}`;
+      send({ type: 'start', state: label, index: i + 1, total: items.length });
 
       try {
-        const leads = await scraper.scrapeStatePage(link);
+        let leads;
+        if (isDropdown) {
+          leads = await scraper.scrapeStateWithDropdown(
+            url,
+            item,                          // { value, label }
+            stateSelectorCSS || stateSelector,
+            searchSelector
+          );
+        } else {
+          leads = await scraper.scrapeStatePage(item); // { label, href }
+        }
         totalLeads += leads.length;
-        send({ type: 'result', state: link.label, leads, count: leads.length, totalSoFar: totalLeads });
+        send({ type: 'result', state: label, leads, count: leads.length, totalSoFar: totalLeads });
       } catch (err) {
-        console.error(`state scrape failed [${link.label}]:`, err.message);
-        send({ type: 'error', state: link.label, error: err.message });
+        console.error(`scrape failed [${label}]:`, err.message);
+        send({ type: 'error', state: label, error: err.message });
       }
     }
 

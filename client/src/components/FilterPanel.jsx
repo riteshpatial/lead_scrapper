@@ -1,31 +1,37 @@
 import { useState } from 'react';
 
 export default function FilterPanel({ filters, onScrapeStates, analyzing }) {
-  const stateLinks = filters?.stateLinks || [];
+  const isDropdown = filters?.type === 'dropdown';
+  const stateItems = isDropdown
+    ? (filters?.stateOptions || [])
+    : (filters?.stateLinks   || []);
+
+  const getKey   = item => isDropdown ? item.value : item.href;
+  const getLabel = item => item.label;
+
   const [selected, setSelected] = useState(new Set());
 
-  const toggle = (href) =>
+  const toggle = key =>
     setSelected(prev => {
       const next = new Set(prev);
-      next.has(href) ? next.delete(href) : next.add(href);
+      next.has(key) ? next.delete(key) : next.add(key);
       return next;
     });
 
-  const allSelected = stateLinks.length > 0 && selected.size === stateLinks.length;
-
-  const toggleAll = () =>
-    setSelected(allSelected ? new Set() : new Set(stateLinks.map(l => l.href)));
+  const allSelected = stateItems.length > 0 && selected.size === stateItems.length;
+  const toggleAll   = () =>
+    setSelected(allSelected ? new Set() : new Set(stateItems.map(getKey)));
 
   const handleScrape = () => {
-    const links = selected.size > 0
-      ? stateLinks.filter(l => selected.has(l.href))
-      : stateLinks;
-    onScrapeStates(links);
+    const items = selected.size > 0
+      ? stateItems.filter(item => selected.has(getKey(item)))
+      : stateItems;
+    onScrapeStates(items, filters);
   };
 
-  if (!stateLinks.length) return null;
+  if (!stateItems.length) return null;
 
-  const count = selected.size || stateLinks.length;
+  const count = selected.size || stateItems.length;
 
   return (
     <div className="card border-indigo-900/50 bg-indigo-950/20 space-y-4">
@@ -33,10 +39,17 @@ export default function FilterPanel({ filters, onScrapeStates, analyzing }) {
         <div>
           <h3 className="font-semibold text-indigo-300 flex items-center gap-2">
             State-wise Data Detected
-            <span className="badge bg-indigo-900 text-indigo-300 border border-indigo-700 text-xs">{stateLinks.length} states</span>
+            <span className="badge bg-indigo-900 text-indigo-300 border border-indigo-700 text-xs">
+              {stateItems.length} states
+            </span>
+            {isDropdown && (
+              <span className="badge bg-slate-800 text-slate-400 border border-slate-700 text-xs">
+                dropdown filter
+              </span>
+            )}
           </h3>
           <p className="text-slate-400 text-xs mt-1">
-            Select states below, then click <strong className="text-white">Scrape</strong> — results will appear in real time as each state finishes.
+            Select states below, then click <strong className="text-white">Scrape</strong> — results stream in as each state finishes.
           </p>
         </div>
         {analyzing && <span className="text-slate-500 text-xs animate-pulse shrink-0">Analyzing…</span>}
@@ -46,19 +59,22 @@ export default function FilterPanel({ filters, onScrapeStates, analyzing }) {
       <label className="flex items-center gap-2 cursor-pointer text-sm text-slate-300 w-fit">
         <input type="checkbox" checked={allSelected} onChange={toggleAll} className="w-4 h-4 accent-indigo-500" />
         {allSelected ? 'Deselect all' : 'Select all states'}
-        <span className="text-slate-500 text-xs">({selected.size} / {stateLinks.length} selected)</span>
+        <span className="text-slate-500 text-xs">({selected.size} / {stateItems.length} selected)</span>
       </label>
 
       {/* State pills */}
       <div className="flex flex-wrap gap-2 max-h-52 overflow-y-auto pr-1">
-        {stateLinks.map((link, i) => {
-          const on = selected.has(link.href);
+        {stateItems.map((item, i) => {
+          const key = getKey(item);
+          const on  = selected.has(key);
           return (
-            <button key={i} onClick={() => toggle(link.href)}
+            <button key={i} onClick={() => toggle(key)}
               className={`px-3 py-1 rounded-lg text-xs font-medium border transition-colors ${
-                on ? 'bg-indigo-600 border-indigo-500 text-white' : 'bg-slate-800 border-slate-700 text-slate-300 hover:border-indigo-600 hover:text-white'
+                on
+                  ? 'bg-indigo-600 border-indigo-500 text-white'
+                  : 'bg-slate-800 border-slate-700 text-slate-300 hover:border-indigo-600 hover:text-white'
               }`}>
-              {link.label}
+              {getLabel(item)}
             </button>
           );
         })}

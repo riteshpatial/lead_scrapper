@@ -53,20 +53,32 @@ export default function App() {
   };
 
   // ── SSE streaming: scrape states one-by-one, push leads in real-time ──────
-  const handleScrapeStates = async (stateLinks) => {
+  const handleScrapeStates = async (items, filtersCtx) => {
     setStreamActive(true);
     setError('');
     setLeads([]);
-    setProgress(`Starting — 0 / ${stateLinks.length} states`);
+    setProgress(`Starting — 0 / ${items.length} states`);
     const t0 = Date.now();
-    const acc = [];   // accumulated leads
+    const acc = [];
     let done = 0;
+
+    const isDropdown = filtersCtx?.type === 'dropdown';
+    const body = isDropdown
+      ? {
+          type: 'dropdown',
+          url: lastUrl,
+          stateSelector:    filtersCtx.stateSelector,
+          stateSelectorCSS: filtersCtx.stateSelectorCSS,
+          searchSelector:   filtersCtx.searchSelector,
+          stateOptions:     items,
+        }
+      : { stateLinks: items };
 
     try {
       const res = await fetch('/api/scrape-states-stream', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ stateLinks }),
+        body: JSON.stringify(body),
       });
 
       if (!res.ok) throw new Error(`Server error ${res.status}`);
@@ -97,10 +109,10 @@ export default function App() {
               done++;
               acc.push(...ev.leads);
               setLeads([...acc]);
-              setProgress(`[${done}/${stateLinks.length}] ${ev.state}: ${ev.count} dealers — Total: ${ev.totalSoFar}`);
+              setProgress(`[${done}/${items.length}] ${ev.state}: ${ev.count} dealers — Total: ${ev.totalSoFar}`);
             } else if (ev.type === 'error') {
               done++;
-              setProgress(`[${done}/${stateLinks.length}] ${ev.state}: failed (${ev.error})`);
+              setProgress(`[${done}/${items.length}] ${ev.state}: failed (${ev.error})`);
             } else if (ev.type === 'done') {
               setScrapeTime(((Date.now() - t0) / 1000).toFixed(0));
               setProgress('');

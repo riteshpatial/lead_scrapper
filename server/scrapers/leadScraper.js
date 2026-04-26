@@ -16,23 +16,19 @@ const SOCIAL_PATTERNS = [
 
 const ORG_TYPES = ['LocalBusiness','Organization','Corporation','Store','Restaurant','Hotel','MedicalBusiness','ProfessionalService'];
 
-// ─── Address parser (works for Indian + generic addresses) ──────────────────
+// ─── Address parser ────────────────────────────────────────────────────────────
 function parseAddress(raw) {
   if (!raw) return { pinCode: '', city: '', locality: '' };
   const text = raw.replace(/\s+/g, ' ').trim();
 
-  // Indian 6-digit PIN
   const pin6 = text.match(/\b(\d{6})\b/);
-  // US/generic 5-digit ZIP
   const pin5 = !pin6 && text.match(/\b(\d{5})\b/);
   const pinCode = (pin6 || pin5 || [])[1] || '';
 
   let city = '', locality = '';
-  // Split on common address delimiters
   const parts = text.replace(/[-–]/g, ',').split(',').map(p => p.trim()).filter(p => p.length > 1);
 
   if (pinCode) {
-    // Find which segment contains the PIN
     const pinIdx = parts.findIndex(p => p.includes(pinCode));
     if (pinIdx > 0) {
       locality = parts[pinIdx - 1] || '';
@@ -40,16 +36,12 @@ function parseAddress(raw) {
     } else if (pinIdx === 0 && parts.length > 1) {
       city = parts[1] || '';
     }
-    // Sometimes city comes after PIN in Indian addresses
-    if (!city && pinIdx >= 0 && parts[pinIdx + 1]) {
-      city = parts[pinIdx + 1];
-    }
+    if (!city && pinIdx >= 0 && parts[pinIdx + 1]) city = parts[pinIdx + 1];
   } else if (parts.length >= 2) {
     locality = parts[parts.length - 1];
     city     = parts[parts.length - 2] || '';
   }
 
-  // Strip digits-only junk
   if (/^\d+$/.test(city))     city     = '';
   if (/^\d+$/.test(locality)) locality = '';
 
@@ -79,191 +71,391 @@ class LeadScraper {
     return page;
   }
 
-  async navigateAndWait(page, url) {
-    await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 30000 });
-    await new Promise(r => setTimeout(r, 2500));
-    // Scroll to trigger lazy-loaded cards
+  async scrollPage(page) {
     await page.evaluate(async () => {
       await new Promise(resolve => {
         let scrolled = 0;
-        const step = 400, max = Math.min(document.body.scrollHeight, 12000);
+        const step = 400, max = Math.min(document.body.scrollHeight, 15000);
         const t = setInterval(() => {
           window.scrollBy(0, step); scrolled += step;
           if (scrolled >= max) { clearInterval(t); window.scrollTo(0, 0); resolve(); }
         }, 120);
       });
     });
-    await new Promise(r => setTimeout(r, 1200));
+    await new Promise(r => setTimeout(r, 1000));
   }
 
-  // ─── CORE: Extract every listing card on the page ──────────────────────────
+  async navigateAndWait(page, url) {
+    await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 30000 });
+    await new Promise(r => setTimeout(r, 2500));
+    await this.scrollPage(page);
+  }
+
+  // ─── Click LOAD MORE until it disappears ───────────────────────────────────
+  async clickLoadMore(page) {
+    let clicks = 0;
+    while (clicks < 30) {
+      const found = await page.evaluate(() => {
+        const btn = [...document.querySelectorAll('button,a,[role="button"]')]
+          .find(el => {
+            if (el.offsetParent === null) return false;
+            const txt = (el.textContent || el.value || '').trim().toLowerCase();
+            return /load\s*more|show\s*more|view\s*more/.test(txt);
+          });
+        if (!btn) return false;
+        btn.scrollIntoView({ behavior: 'smooth', block: 'center' });
+        btn.click();
+        return true;
+      });
+      if (!found) break;
+      await new Promise(r => setTimeout(r, 2500));
+      clicks++;
+    }
+  }
+
+  // ─── CORE: Extract every listing card — 3 strategies ─────────────────────
   async detectListings(page, stateName = '') {
     return await page.evaluate((state) => {
-      // Walk up DOM to find the card container that holds a heading + contact
-      function getCard(el) {
-        let node = el.parentElement;
-        for (let d = 0; d < 15 && node; d++) {
-          const heading = node.querySelector('h1,h2,h3,h4,h5,h6');
-          if (heading) {
-            const rect = node.getBoundingClientRect();
-            const hasContact = node.querySelector('a[href^="mailto:"],a[href^="tel:"]');
-            if (hasContact && rect.height >= 60 && rect.height <= window.innerHeight * 0.96 && rect.width >= 120) return node;
-          }
-          node = node.parentElement;
-        }
-        return null;
+      const EMAIL_RX  = /[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}/i;
+      const EMAIL_RX_G = /[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}/gi;
+      const PURE_PHONE = /^[\+\d\s\-\(\)\.]{7,25}$/;
+      const IGNORE_LINE = /^(direction|directions|call|website|read reviews?|book|get directions?|find dealer|view more|sales|service|spares|more info|locate|map|open|close|show more|load more|contact|know more|enquiry|inquiry)/i;
+
+      // ── Helpers inside browser context ──────────────────────────────────────
+
+      function getEmails(container) {
+        const fromLinks = [...container.querySelectorAll('a[href^="mailto:"]')]
+          .map(a => a.href.replace('mailto:', '').split('?')[0].trim().toLowerCase())
+          .filter(e => e.includes('@') && e.includes('.'));
+
+        const text = container.innerText || '';
+        const fromText = (text.match(EMAIL_RX_G) || []).map(e => e.toLowerCase());
+
+        return [...new Set([...fromLinks, ...fromText])].filter(e => e.includes('@') && !e.includes(' '));
       }
 
-      function extractCard(card) {
-        // ── Dealer / Business name (primary heading) ──
+      function getPhones(container) {
+        const fromLinks = [...container.querySelectorAll('a[href^="tel:"]')]
+          .map(a => {
+            const txt = (a.innerText || a.textContent || '').replace(/\s+/g,' ').trim();
+            const href = a.href.replace('tel:','').trim();
+            return (txt && /\d{5,}/.test(txt)) ? txt : href;
+          })
+          .filter(p => p && p.replace(/\D/g,'').length >= 7);
+
+        const lines = (container.innerText || '').split('\n').map(l => l.trim());
+        const fromText = lines.filter(l => {
+          if (!l || l.length < 6 || l.length > 25) return false;
+          const d = l.replace(/\D/g,'');
+          return d.length >= 7 && d.length <= 15 && PURE_PHONE.test(l);
+        });
+
+        return [...new Set([...fromLinks, ...fromText])].filter(p => p.replace(/\D/g,'').length >= 7);
+      }
+
+      function extractCard(card, emails, phones) {
         const headings = [...card.querySelectorAll('h1,h2,h3,h4,h5,h6')];
         const dealerName = headings.map(h => h.textContent.trim()).find(t => t.length > 0) || '';
 
-        // ── Company name (bold/strong, different from dealer name) ──
-        const companyName = [...card.querySelectorAll('strong,b')]
-          .map(el => el.textContent.trim())
-          .find(t => t && t !== dealerName && t.length > 2 && t.length < 200) || '';
+        const companyEl = [...card.querySelectorAll('strong,b')]
+          .find(el => {
+            const t = el.textContent.trim();
+            return t && t !== dealerName && t.length > 2 && t.length < 200;
+          });
+        const companyName = companyEl?.textContent.trim() || '';
 
-        // ── Emails ──
-        const emails = [...new Set(
-          [...card.querySelectorAll('a[href^="mailto:"]')]
-            .map(a => a.href.replace('mailto:', '').split('?')[0].trim().toLowerCase())
-            .filter(e => e.includes('@') && e.includes('.'))
-        )];
+        // Address: extract from card text, filtering known non-address content
+        const cardText = card.innerText || '';
+        const lines = cardText.split('\n').map(l => l.trim()).filter(Boolean);
+        const emailSet = new Set(emails.map(e => e.toLowerCase()));
+        const phoneDigitSet = new Set(phones.map(p => p.replace(/\D/g,'')));
 
-        // ── Phones (prefer visible text of tel: links) ──
-        const phones = [...new Set(
-          [...card.querySelectorAll('a[href^="tel:"]')]
-            .map(a => {
-              const txt = (a.innerText || a.textContent || '').replace(/\s+/g,' ').trim();
-              const href = a.href.replace('tel:','').trim();
-              return (txt && /\d{5,}/.test(txt)) ? txt : href;
-            })
-            .filter(p => p && p.replace(/\D/g,'').length >= 7)
-        )];
+        const addrLines = lines.filter(l => {
+          if (!l || l.length < 3 || l.length > 200) return false;
+          if (l === dealerName || l === companyName) return false;
+          if (emailSet.has(l.toLowerCase()) || EMAIL_RX.test(l)) return false;
+          const d = l.replace(/\D/g,'');
+          if (d.length >= 7 && (phoneDigitSet.has(d) || (PURE_PHONE.test(l) && d.length >= 7))) return false;
+          if (IGNORE_LINE.test(l.trim()) && l.length < 50) return false;
+          return true;
+        });
+        const address = addrLines.join(', ');
 
-        // ── Full address ──
-        let address = '';
-        const addrEl = card.querySelector('address,[class*="address"],[class*="addr"],[class*="location"],[class*="loc-"]');
-        if (addrEl) address = (addrEl.innerText || addrEl.textContent || '').replace(/\s+/g,' ').trim();
-
-        if (!address) {
-          // Walk text nodes looking for address-like content
-          const walker = document.createTreeWalker(card, NodeFilter.SHOW_TEXT);
-          const cands = [];
-          let n;
-          while ((n = walker.nextNode())) {
-            const t = n.textContent.replace(/\s+/g,' ').trim();
-            if (t.length > 8 && t.length < 300 && !t.includes('@') && /[A-Za-z]/.test(t) && /\d/.test(t) && !/^\+?[\d\s\-()+.]{7,}$/.test(t)) {
-              cands.push(t);
-            }
-          }
-          address = cands.find(t =>
-            /\b(road|street|rd|st|plot|sector|phase|nagar|marg|block|floor|building|area|colony|near|opp|opposite|lane|village|ward|district|indl|industrial|pvt|ltd)\b/i.test(t)
-            || (t.includes(',') && /\d/.test(t))
-          ) || cands[0] || '';
-        }
-
-        // ── Rating ──
-        const ratingEl = card.querySelector('[class*="rating"],[class*="star"],[data-rating]');
+        // Rating
         let rating = null;
+        const ratingEl = card.querySelector('[class*="rating"],[class*="star"],[data-rating]');
         if (ratingEl) {
           const rv = ratingEl.getAttribute('data-rating') || (ratingEl.textContent.match(/[\d.]+/) || [])[0];
-          rating = rv ? parseFloat(rv) : null;
+          if (rv) rating = parseFloat(rv);
+        }
+        if (!rating) {
+          const m = cardText.match(/(\d+\.?\d*)\s*\/\s*5/);
+          if (m) rating = parseFloat(m[1]);
         }
 
-        // ── Open / Closed status ──
-        const cardText = (card.innerText || '').toLowerCase();
+        // Status
+        const cardLower = cardText.toLowerCase();
         let status = '';
-        if (/open\s*now/.test(cardText)) status = 'Open Now';
-        else if (/\bclosed\b/.test(cardText) || /opens\s+(at|tomorrow|on)/.test(cardText)) status = 'Closed';
+        if (/open\s*now/.test(cardLower)) status = 'Open Now';
+        else if (/\bclosed\b/.test(cardLower)) status = 'Closed';
 
-        // ── Website URL — look for "WEBSITE" button first ──
+        // Website
         const allLinks = [...card.querySelectorAll('a[href^="http"],a[href^="//"]')];
-        const websiteBtn = allLinks.find(a => /^website$|visit website|official site/i.test((a.textContent||'').trim()));
+        const websiteBtn = allLinks.find(a => /^website$|visit website/i.test((a.textContent||'').trim()));
         const externalLink = allLinks.find(a => {
           const h = a.href.toLowerCase();
-          return !['google','facebook','twitter','instagram','youtube','linkedin','maps','goo.gl',window.location.hostname]
-            .some(d => h.includes(d));
+          return !['google','facebook','twitter','instagram','youtube','linkedin','maps','goo.gl',window.location.hostname].some(d => h.includes(d));
         });
         const website = websiteBtn?.href || externalLink?.href || '';
 
-        // ── Services / tags (SALES, SERVICE, SPARES, etc.) ──
+        // Services / tags
         const services = [...new Set(
-          [...card.querySelectorAll('button,[class*="service"],[class*="tag"],[class*="badge"],[class*="label"],[class*="type"],[class*="pill"]')]
+          [...card.querySelectorAll('button,[class*="service"],[class*="tag"],[class*="badge"],[class*="label"],[class*="pill"]')]
             .map(el => el.textContent.trim())
-            .filter(t => t.length >= 2 && t.length <= 30 && /^[A-Z]/.test(t)
-              && !/^(READ|GET|VIEW|BOOK|CALL|FIND|VISIT|SHOW|CLICK|MORE|OPEN|CLOSE|MAP|DIR|REVIEW|CONNECT|EXPERT|WEBSITE)/i.test(t))
+            .filter(t => t.length >= 2 && t.length <= 40 && !/^(read|get|view|book|call|find|visit|show|click|more|open|close|map|dir|review|connect|website|load|direction|know|enquir|inquir)/i.test(t))
         )].slice(0, 8);
 
         return { dealerName, companyName, emails, phones, address, rating, status, services, website };
       }
 
-      // Gather all elements that have a mailto: or tel: link
-      const contactEls = [
-        ...document.querySelectorAll('a[href^="mailto:"]'),
-        ...document.querySelectorAll('a[href^="tel:"]'),
-      ];
-      if (contactEls.length < 2) return null;
-
-      const seen = new WeakSet();
-      const results = [];
-      for (const el of contactEls) {
-        const card = getCard(el);
-        if (!card || seen.has(card)) continue;
-        seen.add(card);
-        const data = extractCard(card);
-        if (data.dealerName || data.emails.length || data.phones.length) {
-          results.push({ ...data, state });
+      // ── Strategy 1: mailto / tel links ─────────────────────────────────────
+      function strategy1() {
+        function getCard(el) {
+          let node = el.parentElement;
+          for (let d = 0; d < 15 && node && node !== document.body; d++) {
+            if (node.querySelector('h1,h2,h3,h4,h5,h6')) {
+              const r = node.getBoundingClientRect();
+              if (r.height >= 60 && r.width >= 120) return node;
+            }
+            node = node.parentElement;
+          }
+          return null;
         }
+        const contactEls = [...document.querySelectorAll('a[href^="mailto:"],a[href^="tel:"]')];
+        if (contactEls.length < 2) return null;
+        const seen = new WeakSet();
+        const results = [];
+        for (const el of contactEls) {
+          const card = getCard(el);
+          if (!card || seen.has(card)) continue;
+          seen.add(card);
+          const emails = getEmails(card);
+          const phones = getPhones(card);
+          const data = extractCard(card, emails, phones);
+          if (data.dealerName || emails.length || phones.length)
+            results.push({ ...data, state });
+        }
+        return results.length >= 2 ? results : null;
       }
-      return results.length >= 2 ? results : null;
+
+      // ── Strategy 2: plain-text email nodes → walk up to card ancestor ──────
+      function strategy2() {
+        const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT);
+        const seen = new WeakSet();
+        const results = [];
+        let n;
+        while ((n = walker.nextNode())) {
+          if (!EMAIL_RX.test(n.textContent)) continue;
+          let node = n.parentElement;
+          let card = null;
+          for (let d = 0; d < 15 && node && node !== document.body; d++) {
+            if (node.querySelector('h1,h2,h3,h4,h5,h6')) {
+              const r = node.getBoundingClientRect();
+              if (r.height >= 60 && r.width >= 120) { card = node; break; }
+            }
+            node = node.parentElement;
+          }
+          if (!card || seen.has(card)) continue;
+          seen.add(card);
+          const emails = getEmails(card);
+          const phones = getPhones(card);
+          const data = extractCard(card, emails, phones);
+          if (data.dealerName || emails.length || phones.length)
+            results.push({ ...data, state });
+        }
+        return results.length >= 2 ? results : null;
+      }
+
+      // ── Strategy 3: repeated CSS class with heading + email ─────────────────
+      function strategy3() {
+        const classMap = {};
+        for (const el of document.querySelectorAll('div,li,article,section')) {
+          const cls = (typeof el.className === 'string' ? el.className : '').trim();
+          if (!cls) continue;
+          const text = el.innerText || '';
+          if (text.length < 20 || text.length > 4000) continue;
+          if (!el.querySelector('h1,h2,h3,h4,h5,h6')) continue;
+          if (!EMAIL_RX.test(text)) continue;
+          if (!classMap[cls]) classMap[cls] = [];
+          classMap[cls].push(el);
+        }
+        const candidates = Object.entries(classMap)
+          .filter(([, els]) => els.length >= 2)
+          .sort(([, a], [, b]) => {
+            if (b.length !== a.length) return b.length - a.length;
+            const avgA = a.reduce((s, e) => s + (e.innerText||'').length, 0) / a.length;
+            const avgB = b.reduce((s, e) => s + (e.innerText||'').length, 0) / b.length;
+            return avgA - avgB;
+          });
+
+        for (const [, els] of candidates) {
+          const seen = new WeakSet();
+          const results = [];
+          for (const card of els) {
+            if (seen.has(card)) continue;
+            seen.add(card);
+            const emails = getEmails(card);
+            const phones = getPhones(card);
+            const data = extractCard(card, emails, phones);
+            if (data.dealerName) results.push({ ...data, state });
+          }
+          if (results.length >= 2) return results;
+        }
+        return null;
+      }
+
+      return strategy1() || strategy2() || strategy3();
     }, stateName);
   }
 
-  // ─── Detect state/city navigation links on the page ──────────────────────
+  // ─── Detect state/city filters on the page ────────────────────────────────
   async detectFilters(page) {
     return await page.evaluate(() => {
       const filters = {};
 
-      // <select> dropdowns
+      // ── Dropdown-based filter detection ─────────────────────────────────────
       for (const sel of document.querySelectorAll('select')) {
-        const labelEl = document.querySelector(`label[for="${sel.id}"]`);
+        const labelEl = sel.id ? document.querySelector(`label[for="${sel.id}"]`) : null;
         const hint = (
           labelEl?.textContent ||
           sel.previousElementSibling?.textContent ||
           sel.getAttribute('aria-label') ||
+          sel.getAttribute('placeholder') ||
           sel.getAttribute('name') ||
           sel.getAttribute('id') || ''
-        ).toLowerCase();
+        ).toLowerCase().trim();
+
+        const skipValues = new Set(['', '--', 'select state', 'all states', 'choose state', 'any state', 'select', 'all', 'choose', 'any', '0', '-1']);
         const opts = [...sel.options]
           .map(o => ({ value: o.value, label: o.text.trim() }))
-          .filter(o => o.value && !['', 'select','--','all','choose','any'].some(d => o.label.toLowerCase().startsWith(d)));
-        if (opts.length >= 2) {
-          if (/state|province|region/.test(hint))       filters.states = { options: opts, selector: sel.name || sel.id };
-          else if (/city|town|district|area/.test(hint)) filters.cities = { options: opts, selector: sel.name || sel.id };
+          .filter(o => o.value && !skipValues.has(o.label.toLowerCase()) && !skipValues.has(o.value));
+
+        if (opts.length >= 2 && /state|province|region/.test(hint)) {
+          filters.type = 'dropdown';
+          filters.stateOptions = opts;
+          filters.stateSelector = sel.name || sel.id || '';
+          filters.stateSelectorCSS = sel.name ? `select[name="${sel.name}"]` : (sel.id ? `select#${sel.id}` : 'select');
+          break;
         }
       }
 
-      // <a>-based state navigation (e.g. Honda-style link list)
-      const navLinks = [...document.querySelectorAll(
-        '[class*="state"] a, [class*="region"] a, [id*="state"] a, [id*="region"] a, [class*="location-nav"] a, [class*="city-list"] a, nav a'
-      )]
-        .map(a => ({ label: (a.textContent||'').trim(), href: a.href }))
-        .filter(l => l.label && l.href && l.label.length < 60 && l.href.startsWith('http')
-          && !l.href.includes('#') && !l.href.includes('javascript'));
+      // Find the SEARCH button (only for dropdown type)
+      if (filters.type === 'dropdown') {
+        const btn = [...document.querySelectorAll('button,input[type="submit"],input[type="button"]')]
+          .find(el => /search|find|go|submit|dealer/i.test((el.textContent || el.value || '').trim()));
+        if (btn) {
+          filters.searchSelector = btn.id
+            ? `#${btn.id}`
+            : btn.getAttribute('name')
+              ? `[name="${btn.getAttribute('name')}"]`
+              : btn.className
+                ? `.${btn.className.trim().split(/\s+/)[0]}`
+                : 'button[type="submit"]';
+        }
+      }
 
-      if (navLinks.length >= 5) filters.stateLinks = navLinks;
+      // ── Link-based state navigation (fallback) ──────────────────────────────
+      if (!filters.type) {
+        const navLinks = [...document.querySelectorAll(
+          '[class*="state"] a, [class*="region"] a, [id*="state"] a, [id*="region"] a, [class*="location-nav"] a, [class*="city-list"] a, nav a'
+        )]
+          .map(a => ({ label: (a.textContent||'').trim(), href: a.href }))
+          .filter(l => l.label && l.href && l.label.length < 60 && l.href.startsWith('http') && !l.href.includes('#') && !l.href.includes('javascript'));
 
-      return Object.keys(filters).length ? filters : null;
+        if (navLinks.length >= 5) {
+          filters.type = 'links';
+          filters.stateLinks = navLinks;
+        }
+      }
+
+      return filters.type ? filters : null;
     });
   }
 
-  // ─── Scrape one state/filter page → returns simplified lead rows ──────────
+  // ─── Scrape using dropdown: select state → click SEARCH → extract ─────────
+  async scrapeStateWithDropdown(url, stateOption, stateSelector, searchSelector) {
+    const page = await this.openPage();
+    try {
+      await this.navigateAndWait(page, url);
+
+      // Select the state value and fire change events
+      await page.evaluate((css, val) => {
+        const el = document.querySelector(css);
+        if (el) {
+          el.value = val;
+          ['input','change'].forEach(ev => el.dispatchEvent(new Event(ev, { bubbles: true })));
+        }
+      }, stateSelector, stateOption.value);
+
+      await new Promise(r => setTimeout(r, 1500));
+
+      // Click SEARCH button
+      await page.evaluate((searchSel) => {
+        let btn = searchSel ? document.querySelector(searchSel) : null;
+        if (!btn) {
+          btn = [...document.querySelectorAll('button,input[type="submit"],input[type="button"]')]
+            .find(el => /search|find|go|submit|dealer/i.test((el.textContent || el.value || '').trim()));
+        }
+        if (btn) btn.click();
+      }, searchSelector || '');
+
+      // Wait for results to load
+      await new Promise(r => setTimeout(r, 3000));
+
+      // Scroll to load lazy content
+      await this.scrollPage(page);
+
+      // Click LOAD MORE until done
+      await this.clickLoadMore(page);
+
+      const rawListings = await this.detectListings(page, stateOption.label);
+      await page.close();
+
+      if (!rawListings || !rawListings.length) return [];
+      return rawListings.map((item, i) => {
+        const { pinCode, city, locality } = parseAddress(item.address);
+        return {
+          state:       item.state || stateOption.label || '',
+          dealerName:  item.dealerName || item.companyName || `Dealer ${i + 1}`,
+          companyName: item.companyName || '',
+          city:        item.city || city || '',
+          locality:    item.locality || locality || '',
+          pinCode:     item.pinCode || pinCode || '',
+          address:     item.address || '',
+          phone:       item.phones[0] || '',
+          phones:      item.phones,
+          email:       item.emails[0] || '',
+          emails:      item.emails,
+          rating:      item.rating ?? null,
+          status:      item.status || '',
+          services:    item.services || [],
+          website:     item.website || '',
+          sourceUrl:   url,
+          scrapedAt:   new Date().toISOString(),
+        };
+      });
+    } catch (err) {
+      await page.close().catch(() => {});
+      throw err;
+    }
+  }
+
+  // ─── Scrape one state page (link-based navigation) ────────────────────────
   async scrapeStatePage(stateLink) {
     const page = await this.openPage();
     try {
       await this.navigateAndWait(page, stateLink.href);
+      await this.clickLoadMore(page);
       const rawListings = await this.detectListings(page, stateLink.label);
       await page.close();
       if (!rawListings || !rawListings.length) return [];
@@ -296,7 +488,7 @@ class LeadScraper {
     }
   }
 
-  // ─── Scrape a single arbitrary URL (listing page or single business) ───────
+  // ─── Scrape a single arbitrary URL ────────────────────────────────────────
   async scrapeUrl(rawUrl) {
     let url = rawUrl.trim();
     if (!url.startsWith('http://') && !url.startsWith('https://')) url = 'https://' + url;
@@ -304,8 +496,8 @@ class LeadScraper {
     const page = await this.openPage();
     try {
       await this.navigateAndWait(page, url);
+      await this.clickLoadMore(page);
 
-      // Try listing detection first
       const rawListings = await this.detectListings(page);
       if (rawListings && rawListings.length >= 2) {
         await page.close();
@@ -334,7 +526,7 @@ class LeadScraper {
         });
       }
 
-      // ── Single business fallback ──────────────────────────────────────────
+      // ── Single business fallback ─────────────────────────────────────────
       const html = await page.content();
       const text = await page.evaluate(() => {
         document.querySelectorAll('script,style,noscript').forEach(e => e.remove());
@@ -351,7 +543,6 @@ class LeadScraper {
       if (structured.telephone) phones = [...new Set([structured.telephone, ...phones])];
       if (structured.email)     emails = [...new Set([structured.email, ...emails])];
 
-      // Crawl sub-pages (contact / about)
       const subLinks = this.findSubPageLinks($, url);
       let pagesScraped = 1;
       for (const subUrl of subLinks) {
@@ -408,7 +599,7 @@ class LeadScraper {
     }
   }
 
-  // ─── Quick analysis: just detect filters, no full scrape ─────────────────
+  // ─── Quick analysis: detect filters only ──────────────────────────────────
   async analyzeUrl(rawUrl) {
     let url = rawUrl.trim();
     if (!url.startsWith('http://') && !url.startsWith('https://')) url = 'https://' + url;

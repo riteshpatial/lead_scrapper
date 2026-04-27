@@ -3,8 +3,6 @@ const router  = express.Router();
 const LeadScraper = require('../scrapers/leadScraper');
 
 // ── POST /api/scrape ──────────────────────────────────────────────────────────
-// Returns { success, results, total, filters }
-// `filters` is populated when the page is a search/filter form (no listings).
 router.post('/scrape', async (req, res) => {
   const { urls } = req.body;
   if (!urls || !Array.isArray(urls) || urls.length === 0)
@@ -50,23 +48,16 @@ router.post('/analyze', async (req, res) => {
 });
 
 // ── POST /api/scrape-states-stream ────────────────────────────────────────────
-// SSE stream — supports link-based AND dropdown-based state scraping.
+// SSE stream — link-based OR dropdown-based.
+// deepScrape:true  → after extracting listing cards, visits each dealer's
+//                    own website to pull extra phones/emails/social/hours.
 //
-// Link payload:     { stateLinks: [{label, href},...] }
-// Dropdown payload: { type:'dropdown', url, stateSelector, stateSelectorCSS,
-//                     searchSelector, stateOptions:[{value,label},...] }
-//
-// SSE event types:
-//   { type:'start',    state, index, total }
-//   { type:'progress', state, msg }           ← granular step updates
-//   { type:'result',   state, leads, count, totalSoFar }
-//   { type:'error',    state, error }
-//   { type:'done',     totalLeads }
-//   { type:'fatal',    error }
+// SSE types: start | progress | result | error | done | fatal
 router.post('/scrape-states-stream', async (req, res) => {
   const {
     type, stateLinks, stateOptions,
     url, stateSelector, stateSelectorCSS, searchSelector,
+    deepScrape = false,
   } = req.body;
 
   const isDropdown = type === 'dropdown';
@@ -77,7 +68,6 @@ router.post('/scrape-states-stream', async (req, res) => {
   if (isDropdown && !url)
     return res.status(400).json({ error: 'Provide url for dropdown-type scraping.' });
 
-  // SSE setup
   res.setHeader('Content-Type',  'text/event-stream');
   res.setHeader('Cache-Control', 'no-cache');
   res.setHeader('Connection',    'keep-alive');
@@ -87,8 +77,8 @@ router.post('/scrape-states-stream', async (req, res) => {
   const send = obj => { if (!res.writableEnded) res.write(`data: ${JSON.stringify(obj)}\n\n`); };
   const ping = setInterval(() => { if (!res.writableEnded) res.write(': ping\n\n'); }, 20000);
 
-  const scraper    = new LeadScraper();
-  let totalLeads   = 0;
+  const scraper  = new LeadScraper();
+  let totalLeads = 0;
 
   try {
     await scraper.init();
@@ -98,11 +88,9 @@ router.post('/scrape-states-stream', async (req, res) => {
 
       const item  = items[i];
       const label = item.label || item.href || `Item ${i + 1}`;
-
       send({ type: 'start', state: label, index: i + 1, total: items.length });
-      console.log(`[stream] [${i+1}/${items.length}] Starting: ${label}`);
+      console.log(`[stream] [${i+1}/${items.length}] Starting: ${label} (deep=${deepScrape})`);
 
-      // progress callback → sent as SSE 'progress' events
       const onProgress = msg => send({ type: 'progress', state: label, msg });
 
       try {
@@ -111,13 +99,10 @@ router.post('/scrape-states-stream', async (req, res) => {
 
         if (isDropdown) {
           leads = await scraper.scrapeStateWithDropdown(
-            url, item,
-            stateSelectorCSS || stateSelector,
-            searchSelector,
-            onProgress,
+            url, item, stateSelectorCSS || stateSelector, searchSelector, onProgress, deepScrape
           );
         } else {
-          leads = await scraper.scrapeStatePage(item, onProgress);
+          leads = await scraper.scrapeStatePage(item, onProgress, deepScrape);
         }
 
         const elapsed = ((Date.now() - t0) / 1000).toFixed(1);
@@ -131,7 +116,7 @@ router.post('/scrape-states-stream', async (req, res) => {
     }
 
     send({ type: 'done', totalLeads });
-    console.log(`[stream] Done. Total leads: ${totalLeads}`);
+    console.log(`[stream] All done. Total: ${totalLeads} leads`);
   } catch (err) {
     send({ type: 'fatal', error: err.message });
     console.error('[stream] FATAL:', err.message);

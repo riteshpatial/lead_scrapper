@@ -16,7 +16,6 @@ const SOCIAL_PATTERNS = [
 
 const ORG_TYPES = ['LocalBusiness','Organization','Corporation','Store','Restaurant','Hotel','MedicalBusiness','ProfessionalService'];
 
-// ── Logging helper ────────────────────────────────────────────────────────────
 function log(msg) {
   console.log(`[${new Date().toISOString()}] [scraper] ${msg}`);
 }
@@ -25,7 +24,6 @@ function log(msg) {
 function parseAddress(raw) {
   if (!raw) return { pinCode: '', city: '', locality: '' };
   const text = raw.replace(/\s+/g, ' ').trim();
-
   const pin6 = text.match(/\b(\d{6})\b/);
   const pin5 = !pin6 && text.match(/\b(\d{5})\b/);
   const pinCode = (pin6 || pin5 || [])[1] || '';
@@ -35,43 +33,36 @@ function parseAddress(raw) {
 
   if (pinCode) {
     const pinIdx = parts.findIndex(p => p.includes(pinCode));
-    if (pinIdx > 0) {
-      locality = parts[pinIdx - 1] || '';
-      city     = parts[pinIdx - 2] || '';
-    } else if (pinIdx === 0 && parts.length > 1) {
-      city = parts[1] || '';
-    }
+    if (pinIdx > 0)                    { locality = parts[pinIdx - 1] || ''; city = parts[pinIdx - 2] || ''; }
+    else if (pinIdx === 0 && parts[1]) { city = parts[1]; }
     if (!city && pinIdx >= 0 && parts[pinIdx + 1]) city = parts[pinIdx + 1];
   } else if (parts.length >= 2) {
     locality = parts[parts.length - 1];
     city     = parts[parts.length - 2] || '';
   }
-
   if (/^\d+$/.test(city))     city     = '';
   if (/^\d+$/.test(locality)) locality = '';
-
   return { pinCode, city: city.slice(0, 60), locality: locality.slice(0, 80) };
 }
 
-// ── Normalise a raw listing into a flat lead object ───────────────────────────
 function normaliseLead(item, defaults = {}) {
   const { pinCode, city, locality } = parseAddress(item.address || '');
   return {
-    state:       item.state       || defaults.state || '',
-    dealerName:  item.dealerName  || item.companyName || defaults.dealerName || '',
+    state:       item.state       || defaults.state     || '',
+    dealerName:  item.dealerName  || item.companyName   || defaults.dealerName || '',
     companyName: item.companyName || '',
-    city:        item.city        || city        || '',
-    locality:    item.locality    || locality    || '',
-    pinCode:     item.pinCode     || pinCode     || '',
+    city:        item.city        || city               || '',
+    locality:    item.locality    || locality           || '',
+    pinCode:     item.pinCode     || pinCode            || '',
     address:     item.address     || '',
     phone:       (item.phones || [])[0] || '',
-    phones:      item.phones  || [],
+    phones:      item.phones      || [],
     email:       (item.emails || [])[0] || '',
-    emails:      item.emails  || [],
-    rating:      item.rating  ?? null,
-    status:      item.status  || '',
-    services:    item.services || [],
-    website:     item.website  || '',
+    emails:      item.emails      || [],
+    rating:      item.rating      ?? null,
+    status:      item.status      || '',
+    services:    item.services    || [],
+    website:     item.website     || '',
     sourceUrl:   defaults.sourceUrl || '',
     scrapedAt:   new Date().toISOString(),
   };
@@ -103,16 +94,15 @@ class LeadScraper {
     return page;
   }
 
-  // ── Scroll the full page to trigger lazy-loading ───────────────────────────
   async scrollPage(page) {
     await page.evaluate(async () => {
       await new Promise(resolve => {
         let scrolled = 0;
-        const step = 400, max = Math.min(document.body.scrollHeight, 15000);
+        const step = 400, max = Math.min(document.body.scrollHeight, 20000);
         const t = setInterval(() => {
           window.scrollBy(0, step); scrolled += step;
           if (scrolled >= max) { clearInterval(t); window.scrollTo(0, 0); resolve(); }
-        }, 120);
+        }, 100);
       });
     });
     await new Promise(r => setTimeout(r, 800));
@@ -125,10 +115,30 @@ class LeadScraper {
     await this.scrollPage(page);
   }
 
-  // ── Repeatedly click LOAD MORE until it disappears ─────────────────────────
+  // ── Dump page structure for debugging (only called when detection fails) ────
+  async dumpPageInfo(page) {
+    const info = await page.evaluate(() => {
+      const EMAIL_RX = /[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}/i;
+      const PHONE_D  = /\d{8,}/;
+      const top = [];
+      for (const el of document.querySelectorAll('div,li,article,section')) {
+        const txt = (el.innerText || '').trim();
+        if (txt.length < 20 || txt.length > 5000) continue;
+        if (!EMAIL_RX.test(txt) && !PHONE_D.test(txt)) continue;
+        const cls = el.className || '';
+        top.push({ tag: el.tagName, cls: cls.slice(0, 60), lines: txt.split('\n').filter(l => l.trim()).length, len: txt.length });
+        if (top.length >= 30) break;
+      }
+      return top;
+    });
+    log('  → PAGE ELEMENTS WITH CONTACT INFO:');
+    info.forEach(e => log(`     <${e.tag} class="${e.cls}"> — ${e.lines} lines, ${e.len} chars`));
+  }
+
+  // ── Click LOAD MORE until gone ─────────────────────────────────────────────
   async clickLoadMore(page, onProgress) {
     let clicks = 0;
-    while (clicks < 15) {
+    while (clicks < 20) {
       const btnText = await page.evaluate(() => {
         const btn = [...document.querySelectorAll('button,a,[role="button"]')]
           .find(el => el.offsetParent !== null &&
@@ -141,24 +151,46 @@ class LeadScraper {
       if (!btnText) break;
       clicks++;
       const msg = `  → clicked "${btnText}" (${clicks})`;
-      log(msg);
-      onProgress?.(msg);
+      log(msg); onProgress?.(msg);
       await new Promise(r => setTimeout(r, 2200));
     }
-    if (clicks) log(`  → LOAD MORE done after ${clicks} click(s)`);
+    if (clicks) log(`  → LOAD MORE done: ${clicks} click(s)`);
   }
 
-  // ── CORE: 3-strategy listing detection ─────────────────────────────────────
+  // ── Wait until >= 2 contact-bearing elements appear ───────────────────────
+  async waitForCards(page, timeoutMs = 10000) {
+    log('  → waiting for dealer cards to appear...');
+    try {
+      await page.waitForFunction(() => {
+        const EMAIL_RX = /[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}/i;
+        const PHONE_D  = /\d{8,}/;
+        let n = 0;
+        for (const el of document.querySelectorAll('div,li,article')) {
+          const txt = el.innerText || '';
+          if (txt.length < 20 || txt.length > 5000) continue;
+          if (EMAIL_RX.test(txt) || PHONE_D.test(txt)) { n++; if (n >= 2) return true; }
+        }
+        return false;
+      }, { timeout: timeoutMs });
+      log('  → cards detected in DOM');
+    } catch (_) {
+      log('  → waitForCards timed out — proceeding anyway');
+    }
+  }
+
+  // ── CORE: 4-strategy listing detection ─────────────────────────────────────
   async detectListings(page, stateName = '') {
-    const count = await page.evaluate(() => document.querySelectorAll('*').length);
-    log(`  → detectListings (DOM nodes: ${count}, state: "${stateName}")`);
+    log(`  → detectListings (state="${stateName}")`);
 
     const results = await page.evaluate((state) => {
       const EMAIL_RX   = /[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}/i;
       const EMAIL_RX_G = /[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}/gi;
       const PURE_PHONE = /^[\+\d\s\-\(\)\.]{7,25}$/;
-      const SKIP_LINE  = /^(direction|directions|call now|website|read reviews?|book|get directions?|find dealer|view more|sales|service|spares|more info|locate|map|open|close|show more|load more|contact|know more|enquir|inquir|connect|expert)/i;
+      const PHONE_LINE = /^\+?[\d\s\-\(\)\.]{7,}$/;
+      const SKIP_LINE  = /^(direction|directions|call\s*now|website|read reviews?|book|get direction|find dealer|view more|load more|show more|contact|know more|enquir|inquir|connect|expert|map|locate|open|close)/i;
+      const BTN_ONLY   = /^(sales|service|spares|parts|accessories)$/i;
 
+      // ── extract emails from element ─────────────────────────────────────────
       function getEmails(el) {
         const fromLinks = [...el.querySelectorAll('a[href^="mailto:"]')]
           .map(a => a.href.replace('mailto:','').split('?')[0].toLowerCase().trim())
@@ -167,6 +199,7 @@ class LeadScraper {
         return [...new Set([...fromLinks, ...fromText])].filter(e => e.includes('@') && !e.includes(' '));
       }
 
+      // ── extract phones from element ─────────────────────────────────────────
       function getPhones(el) {
         const fromLinks = [...el.querySelectorAll('a[href^="tel:"]')]
           .map(a => {
@@ -184,44 +217,84 @@ class LeadScraper {
         return [...new Set([...fromLinks, ...fromText])].filter(p => p.replace(/\D/g,'').length >= 7);
       }
 
+      // ── extract all data from a card element ────────────────────────────────
       function buildCard(card, emails, phones) {
-        const heads   = [...card.querySelectorAll('h1,h2,h3,h4,h5,h6')];
-        const dealerName = heads.map(h => h.textContent.trim()).find(t => t.length > 0) || '';
-        const companyEl  = [...card.querySelectorAll('strong,b')]
-          .find(el => { const t = el.textContent.trim(); return t && t !== dealerName && t.length > 2 && t.length < 200; });
-        const companyName = companyEl?.textContent.trim() || '';
+        // ── Dealer name: 1) heading tag  2) name-class  3) first valid line ──
+        const heads = [...card.querySelectorAll('h1,h2,h3,h4,h5,h6')];
+        let dealerName = heads.map(h => h.textContent.trim()).find(t => t.length > 0) || '';
 
-        // Line-based address extraction: strip dealer/company names, emails, phones, buttons
+        if (!dealerName) {
+          const nameEl = card.querySelector(
+            '[class*="dealer-name"],[class*="dealername"],[class*="shop-name"],[class*="firm-name"],' +
+            '[class*="name"],[class*="title"],[class*="heading"],[class*="firm"],[class*="brand"]'
+          );
+          if (nameEl) dealerName = nameEl.textContent.trim().split('\n')[0].trim().slice(0, 120);
+        }
+
+        if (!dealerName) {
+          const emailSet    = new Set(emails.map(e => e.toLowerCase()));
+          const phoneDigits = new Set(phones.map(p => p.replace(/\D/g,'')));
+          const lines       = (card.innerText || '').split('\n').map(l => l.trim()).filter(Boolean);
+          dealerName = lines.find(l => {
+            if (!l || l.length < 2 || l.length > 120) return false;
+            if (emailSet.has(l.toLowerCase()) || EMAIL_RX.test(l)) return false;
+            const d = l.replace(/\D/g,'');
+            if (d.length >= 7 && (phoneDigits.has(d) || PURE_PHONE.test(l))) return false;
+            if (SKIP_LINE.test(l.trim()) && l.length < 50) return false;
+            if (BTN_ONLY.test(l.trim())) return false;
+            // Skip all-uppercase short strings (SALES, SERVICE, etc.)
+            if (l === l.toUpperCase() && l.length < 20 && !/\d/.test(l)) return false;
+            return true;
+          }) || '';
+        }
+
+        // ── Company name (bold/strong or secondary line after dealer name) ───
+        const companyEl = [...card.querySelectorAll('strong,b,[class*="company"],[class*="firm-name"],[class*="org"]')]
+          .find(el => {
+            const t = el.textContent.trim();
+            return t && t !== dealerName && t.length > 2 && t.length < 200;
+          });
+        const companyName = companyEl?.textContent.trim().split('\n')[0].trim() || '';
+
+        // ── Address: every remaining line that looks like location text ──────
+        const cardText    = card.innerText || '';
+        const allLines    = cardText.split('\n').map(l => l.trim()).filter(Boolean);
         const emailSet    = new Set(emails.map(e => e.toLowerCase()));
         const phoneDigits = new Set(phones.map(p => p.replace(/\D/g,'')));
-        const lines = (card.innerText || '').split('\n').map(l => l.trim()).filter(Boolean);
-        const addrLines = lines.filter(l => {
-          if (!l || l.length < 3 || l.length > 200) return false;
+
+        const addrLines = allLines.filter(l => {
+          if (!l || l.length < 3 || l.length > 250) return false;
           if (l === dealerName || l === companyName) return false;
           if (emailSet.has(l.toLowerCase()) || EMAIL_RX.test(l)) return false;
           const d = l.replace(/\D/g,'');
           if (d.length >= 7 && (phoneDigits.has(d) || (PURE_PHONE.test(l) && d.length >= 7))) return false;
-          if (SKIP_LINE.test(l.trim()) && l.length < 50) return false;
-          return true;
+          if (SKIP_LINE.test(l.trim()) && l.length < 60) return false;
+          if (BTN_ONLY.test(l.trim())) return false;
+          if (l === l.toUpperCase() && l.length < 20 && !/\d/.test(l)) return false;
+          // Keep lines that look like address content
+          const hasDigit  = /\d/.test(l);
+          const hasLetter = /[A-Za-z]/.test(l);
+          const hasComma  = l.includes(',');
+          return (hasDigit && hasLetter) || hasComma || l.length > 20;
         });
         const address = addrLines.join(', ');
 
-        // Rating
+        // ── Rating ───────────────────────────────────────────────────────────
         let rating = null;
-        const rEl = card.querySelector('[class*="rating"],[class*="star"],[data-rating]');
+        const rEl = card.querySelector('[class*="rating"],[class*="star"],[data-rating],[class*="review-score"]');
         if (rEl) {
           const rv = rEl.getAttribute('data-rating') || (rEl.textContent.match(/[\d.]+/) || [])[0];
           if (rv) rating = parseFloat(rv);
         }
-        if (!rating) { const m = (card.innerText||'').match(/(\d+\.?\d*)\s*\/\s*5/); if (m) rating = parseFloat(m[1]); }
+        if (!rating) { const m = cardText.match(/(\d+\.?\d*)\s*\/\s*5/); if (m) rating = parseFloat(m[1]); }
 
-        // Status
-        const clo = (card.innerText || '').toLowerCase();
+        // ── Status ──────────────────────────────────────────────────────────
+        const clo = cardText.toLowerCase();
         let status = '';
-        if (/open\s*now/.test(clo))  status = 'Open Now';
+        if (/open\s*now/.test(clo)) status = 'Open Now';
         else if (/\bclosed\b/.test(clo)) status = 'Closed';
 
-        // Website (prefer WEBSITE button, then external link)
+        // ── Website: prefer explicit WEBSITE button, then external link ─────
         const aLinks = [...card.querySelectorAll('a[href^="http"],a[href^="//"]')];
         const websiteBtn  = aLinks.find(a => /^website$|visit website/i.test((a.textContent||'').trim()));
         const externalLnk = aLinks.find(a => {
@@ -230,29 +303,57 @@ class LeadScraper {
         });
         const website = websiteBtn?.href || externalLnk?.href || '';
 
-        // Services
+        // ── Services / tags ─────────────────────────────────────────────────
         const services = [...new Set(
-          [...card.querySelectorAll('button,[class*="service"],[class*="tag"],[class*="badge"],[class*="label"],[class*="pill"]')]
+          [...card.querySelectorAll('button,[class*="service"],[class*="tag"],[class*="badge"],[class*="label"],[class*="pill"],[class*="type"]')]
             .map(el => el.textContent.trim())
-            .filter(t => t.length >= 2 && t.length <= 40 && !/^(read|get|view|book|call|find|visit|show|click|more|open|close|map|dir|review|connect|website|load|direction|know|enquir|inquir)/i.test(t))
-        )].slice(0, 8);
+            .filter(t => t.length >= 3 && t.length <= 40 &&
+              !/^(read|get|view|book|call|find|visit|show|click|more|open|close|map|dir|review|connect|website|load|direction|know|enquir|inquir)/i.test(t))
+        )].slice(0, 10);
 
-        return { dealerName, companyName, emails, phones, address, rating, status, services, website };
+        // ── Detail page link (for deep scrape) ──────────────────────────────
+        const detailLink = [...card.querySelectorAll('a[href]')]
+          .find(a => {
+            const txt = (a.textContent || '').trim().toLowerCase();
+            const href = a.href || '';
+            return (
+              (/more info|details?|view profile|read more|know more/i.test(txt) ||
+               /dealer\/|dealership\/|showroom\//i.test(href))
+              && href.startsWith('http') && !href.includes('google') && !href.includes('maps')
+            );
+          })?.href || '';
+
+        // ── Google Maps link ────────────────────────────────────────────────
+        const mapsLink = [...card.querySelectorAll('a[href]')]
+          .find(a => /maps\.google|google\.com\/maps|maps\.app/i.test(a.href || ''))?.href || '';
+
+        return { dealerName, companyName, emails, phones, address, rating, status, services, website, detailLink, mapsLink };
+      }
+
+      // ── Shared: walk up from contact element to find card ancestor ──────────
+      // Relaxed: headings preferred but not required
+      function upToCard(el) {
+        let node = el.parentElement;
+        let fallback = null;
+        for (let d = 0; d < 14 && node && node !== document.body; d++) {
+          const txt  = node.innerText || '';
+          const lines = txt.split('\n').filter(l => l.trim().length >= 2);
+          if (lines.length < 2 || txt.length < 25) { node = node.parentElement; continue; }
+
+          const hasHeading = !!node.querySelector('h1,h2,h3,h4,h5,h6');
+          const r = node.getBoundingClientRect();
+          const sizeOk = r.width >= 120 && txt.length <= 8000;
+
+          if (hasHeading && sizeOk) return node;             // best: heading-based card
+          if (!hasHeading && sizeOk && r.height <= 800 && lines.length >= 3 && !fallback)
+            fallback = node;                                  // fallback: size-based card
+          node = node.parentElement;
+        }
+        return fallback;
       }
 
       // ── Strategy 1: mailto / tel links ──────────────────────────────────────
       function s1() {
-        function upToCard(el) {
-          let node = el.parentElement;
-          for (let d = 0; d < 15 && node && node !== document.body; d++) {
-            if (node.querySelector('h1,h2,h3,h4,h5,h6')) {
-              const r = node.getBoundingClientRect();
-              if (r.height >= 60 && r.width >= 120) return node;
-            }
-            node = node.parentElement;
-          }
-          return null;
-        }
         const contactEls = [...document.querySelectorAll('a[href^="mailto:"],a[href^="tel:"]')];
         if (contactEls.length < 2) return null;
         const seen = new WeakSet(), results = [];
@@ -267,21 +368,14 @@ class LeadScraper {
         return results.length >= 2 ? results : null;
       }
 
-      // ── Strategy 2: plain-text email node → walk up to heading ancestor ─────
+      // ── Strategy 2: plain-text email node → walk up to card ─────────────────
       function s2() {
         const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT);
         const seen = new WeakSet(), results = [];
         let n;
         while ((n = walker.nextNode())) {
           if (!EMAIL_RX.test(n.textContent)) continue;
-          let node = n.parentElement, card = null;
-          for (let d = 0; d < 15 && node && node !== document.body; d++) {
-            if (node.querySelector('h1,h2,h3,h4,h5,h6')) {
-              const r = node.getBoundingClientRect();
-              if (r.height >= 60 && r.width >= 120) { card = node; break; }
-            }
-            node = node.parentElement;
-          }
+          const card = upToCard(n.parentElement);
           if (!card || seen.has(card)) continue;
           seen.add(card);
           const emails = getEmails(card), phones = getPhones(card);
@@ -291,28 +385,69 @@ class LeadScraper {
         return results.length >= 2 ? results : null;
       }
 
-      // ── Strategy 3: repeated CSS class with heading + email ─────────────────
+      // ── Strategy 3: repeated CSS class + email OR phone (NO heading required)
       function s3() {
         const classMap = {};
         for (const el of document.querySelectorAll('div,li,article,section')) {
           const cls = (typeof el.className === 'string' ? el.className : '').trim();
           if (!cls) continue;
           const txt = el.innerText || '';
-          if (txt.length < 20 || txt.length > 8000) continue;
-          if (!el.querySelector('h1,h2,h3,h4,h5,h6')) continue;
-          if (!EMAIL_RX.test(txt)) continue;
+          if (txt.length < 30 || txt.length > 8000) continue;
+          const hasEmail = EMAIL_RX.test(txt);
+          const hasPhone = txt.split('\n').some(l => { const d = l.trim().replace(/\D/g,''); return d.length >= 7 && d.length <= 15; });
+          if (!hasEmail && !hasPhone) continue;
           if (!classMap[cls]) classMap[cls] = [];
           classMap[cls].push(el);
         }
         const candidates = Object.entries(classMap)
           .filter(([, els]) => els.length >= 2)
-          .sort(([, a], [, b]) => b.length !== a.length
-            ? b.length - a.length
-            : (a.reduce((s,e)=>s+(e.innerText||'').length,0)/a.length) - (b.reduce((s,e)=>s+(e.innerText||'').length,0)/b.length));
-
-        for (const [cls, els] of candidates) {
+          .sort(([, a], [, b]) => {
+            if (b.length !== a.length) return b.length - a.length;
+            const avgA = a.reduce((s,e) => s + (e.innerText||'').length, 0) / a.length;
+            const avgB = b.reduce((s,e) => s + (e.innerText||'').length, 0) / b.length;
+            return avgA - avgB;
+          });
+        for (const [, els] of candidates) {
           const seen = new WeakSet(), results = [];
           for (const card of els) {
+            if (seen.has(card)) continue;
+            seen.add(card);
+            const emails = getEmails(card), phones = getPhones(card);
+            if (!emails.length && !phones.length) continue;
+            const data = buildCard(card, emails, phones);
+            if (data.dealerName) results.push({ ...data, state });
+          }
+          if (results.length >= 2) return results;
+        }
+        return null;
+      }
+
+      // ── Strategy 4: homogeneous siblings — same tag, multiple contact items ─
+      function s4() {
+        for (const parent of document.querySelectorAll('div,ul,section,main,ol')) {
+          const kids = [...parent.children].filter(c => {
+            if (['SCRIPT','STYLE','HEADER','FOOTER','NAV','HEAD'].includes(c.tagName)) return false;
+            const txt = c.innerText || '';
+            return txt.length >= 30 && txt.length <= 8000;
+          });
+          if (kids.length < 2) continue;
+
+          // Group by tag
+          const byTag = {};
+          for (const k of kids) { if (!byTag[k.tagName]) byTag[k.tagName] = []; byTag[k.tagName].push(k); }
+          const group = Object.values(byTag).sort((a, b) => b.length - a.length)[0];
+          if (!group || group.length < 2) continue;
+
+          const withContact = group.filter(c => {
+            const txt = c.innerText || '';
+            const hasEmail = EMAIL_RX.test(txt);
+            const hasPhone = txt.split('\n').some(l => { const d = l.trim().replace(/\D/g,''); return d.length >= 7 && d.length <= 15; });
+            return hasEmail || hasPhone;
+          });
+          if (withContact.length < 2) continue;
+
+          const seen = new WeakSet(), results = [];
+          for (const card of withContact) {
             if (seen.has(card)) continue;
             seen.add(card);
             const emails = getEmails(card), phones = getPhones(card);
@@ -324,106 +459,156 @@ class LeadScraper {
         return null;
       }
 
-      return s1() || s2() || s3();
+      const r1 = s1(); if (r1) return { results: r1, strategy: 1 };
+      const r2 = s2(); if (r2) return { results: r2, strategy: 2 };
+      const r3 = s3(); if (r3) return { results: r3, strategy: 3 };
+      const r4 = s4(); if (r4) return { results: r4, strategy: 4 };
+      return null;
     }, stateName);
 
     if (results) {
-      log(`  → detectListings: ${results.length} cards found`);
-    } else {
-      log(`  → detectListings: no multi-card listings detected`);
+      log(`  → detectListings: strategy ${results.strategy} found ${results.results.length} cards`);
+      return results.results;
     }
-    return results;
+    log(`  → detectListings: all strategies failed — dumping page info`);
+    await this.dumpPageInfo(page);
+    return null;
   }
 
-  // ── Detect state/city filters on the page ─────────────────────────────────
+  // ── Detect state/city filters ─────────────────────────────────────────────
   async detectFilters(page) {
     log('  → detectFilters...');
     const filters = await page.evaluate(() => {
       const f = {};
-
-      // Dropdown-based
       for (const sel of document.querySelectorAll('select')) {
         const labelEl = sel.id ? document.querySelector(`label[for="${sel.id}"]`) : null;
         const hint = (
-          labelEl?.textContent ||
-          sel.previousElementSibling?.textContent ||
-          sel.getAttribute('aria-label') ||
-          sel.getAttribute('placeholder') ||
-          sel.getAttribute('name') ||
-          sel.getAttribute('id') || ''
+          labelEl?.textContent || sel.previousElementSibling?.textContent ||
+          sel.getAttribute('aria-label') || sel.getAttribute('placeholder') ||
+          sel.getAttribute('name') || sel.getAttribute('id') || ''
         ).toLowerCase().trim();
-
         const skipVals = new Set(['','--','select state','all states','choose state','any state','select','all','choose','any','0','-1']);
         const opts = [...sel.options]
           .map(o => ({ value: o.value, label: o.text.trim() }))
           .filter(o => o.value && !skipVals.has(o.label.toLowerCase()) && !skipVals.has(o.value));
-
         if (opts.length >= 2 && /state|province|region/.test(hint)) {
-          f.type = 'dropdown';
-          f.stateOptions = opts;
+          f.type = 'dropdown'; f.stateOptions = opts;
           f.stateSelector = sel.name || sel.id || '';
           f.stateSelectorCSS = sel.name ? `select[name="${sel.name}"]` : sel.id ? `select#${sel.id}` : 'select';
           break;
         }
       }
-
       if (f.type === 'dropdown') {
         const btn = [...document.querySelectorAll('button,input[type="submit"],input[type="button"]')]
           .find(el => /search|find|go|submit|dealer/i.test((el.textContent || el.value || '').trim()));
         if (btn) {
-          f.searchSelector = btn.id
-            ? `#${btn.id}`
+          f.searchSelector = btn.id ? `#${btn.id}`
             : btn.name ? `[name="${btn.name}"]`
             : btn.className ? `.${btn.className.trim().split(/\s+/)[0]}`
             : 'button[type="submit"]';
         }
       }
-
-      // Link-based fallback
       if (!f.type) {
         const navLinks = [...document.querySelectorAll(
-          '[class*="state"] a,[class*="region"] a,[id*="state"] a,[id*="region"] a,[class*="location-nav"] a,[class*="city-list"] a,nav a'
-        )]
-          .map(a => ({ label: (a.textContent||'').trim(), href: a.href }))
+          '[class*="state"] a,[class*="region"] a,[id*="state"] a,[class*="location-nav"] a,nav a'
+        )].map(a => ({ label: (a.textContent||'').trim(), href: a.href }))
           .filter(l => l.label && l.href && l.label.length < 60 && l.href.startsWith('http') && !l.href.includes('#'));
         if (navLinks.length >= 5) { f.type = 'links'; f.stateLinks = navLinks; }
       }
-
       return f.type ? f : null;
     });
-
-    if (filters) log(`  → detectFilters: type="${filters.type}", options=${filters.stateOptions?.length || filters.stateLinks?.length || 0}`);
-    else          log(`  → detectFilters: none found`);
+    if (filters) log(`  → detectFilters: type="${filters.type}", ${filters.stateOptions?.length || filters.stateLinks?.length || 0} options`);
+    else          log('  → detectFilters: none found');
     return filters;
   }
 
-  // ── Scrape via dropdown: select state → SEARCH → extract ──────────────────
-  async scrapeStateWithDropdown(url, stateOption, cssSelector, searchSelector, onProgress) {
+  // ── Deep scrape: visit each dealer's own website ───────────────────────────
+  async deepScrapeCard(lead, onProgress) {
+    const target = lead.detailLink || lead.website;
+    if (!target || target === lead.sourceUrl) return lead;
+    // Don't scrape Google, social media, maps
+    if (/google|facebook|instagram|twitter|maps\.app|linkedin|youtube/i.test(target)) return lead;
+    if (lead.deepScraped) return lead;
+
+    log(`  → deepScrapeCard: ${target}`);
+    onProgress?.(`  Deep scanning ${lead.dealerName}...`);
+    const page = await this.openPage();
+    try {
+      await page.goto(target, { waitUntil: 'domcontentloaded', timeout: 20000 });
+      await new Promise(r => setTimeout(r, 1500));
+      const html = await page.content();
+      const text = await page.evaluate(() => {
+        document.querySelectorAll('script,style,noscript').forEach(e => e.remove());
+        return document.body?.innerText || '';
+      });
+      await page.close();
+
+      const $         = cheerio.load(html);
+      const extraEmails = this.extractEmails(html, text);
+      const extraPhones = this.extractPhonesFromText(text);
+      const social      = this.extractSocialMedia($);
+      const structured  = this.extractStructuredData($);
+
+      return {
+        ...lead,
+        emails:       [...new Set([...lead.emails, ...extraEmails])].slice(0, 10),
+        phones:       [...new Set([...lead.phones, ...extraPhones])].slice(0, 8),
+        email:        lead.email || extraEmails[0] || '',
+        phone:        lead.phone || extraPhones[0] || '',
+        address:      lead.address || structured.address || '',
+        socialMedia:  Object.keys(social).length ? social : undefined,
+        openingHours: lead.openingHours || structured.openingHours || '',
+        description:  lead.description  || structured.description  || '',
+        deepScraped:  true,
+      };
+    } catch (err) {
+      log(`  → deepScrapeCard FAILED for ${lead.dealerName}: ${err.message}`);
+      await page.close().catch(() => {});
+      return lead;
+    }
+  }
+
+  // ── Run deep scrape on a batch of leads (limited concurrency) ──────────────
+  async deepScrapeLeads(leads, onProgress) {
+    log(`  → deepScrapeLeads: ${leads.length} leads, concurrency=3`);
+    const results = new Array(leads.length);
+    const CONCURRENCY = 3;
+    for (let i = 0; i < leads.length; i += CONCURRENCY) {
+      const chunk = leads.slice(i, i + CONCURRENCY);
+      const done  = await Promise.all(
+        chunk.map(lead => this.deepScrapeCard(lead, onProgress).catch(() => lead))
+      );
+      done.forEach((l, j) => { results[i + j] = l; });
+    }
+    return results;
+  }
+
+  // ── Scrape via dropdown: select state → SEARCH → extract ─────────────────
+  async scrapeStateWithDropdown(url, stateOption, cssSelector, searchSelector, onProgress, deepMode = false) {
     const label = stateOption.label;
-    log(`[${label}] scrapeStateWithDropdown start`);
+    log(`[${label}] scrapeStateWithDropdown (deepMode=${deepMode})`);
     onProgress?.(`Navigating to site...`);
 
     const page = await this.openPage();
     try {
       await this.navigateAndWait(page, url);
 
-      // Select state value and fire events
-      log(`[${label}] Selecting state dropdown (value="${stateOption.value}", css="${cssSelector}")`);
+      // Select state
+      log(`[${label}] Selecting state: value="${stateOption.value}" css="${cssSelector}"`);
       onProgress?.(`Selecting state: ${label}`);
       const selected = await page.evaluate((css, val) => {
         const el = document.querySelector(css);
-        if (!el) return false;
+        if (!el) return `NOT_FOUND (${css})`;
         el.value = val;
         ['input','change'].forEach(ev => el.dispatchEvent(new Event(ev, { bubbles: true })));
-        return true;
+        return `OK (${el.tagName}[value="${val}"])`;
       }, cssSelector, stateOption.value);
-      log(`[${label}] State select result: ${selected}`);
+      log(`[${label}] Select result: ${selected}`);
 
-      // Wait for any cascading dropdowns to update
       await new Promise(r => setTimeout(r, 1500));
 
-      // Click SEARCH — wait for navigation (form submit) OR settle (AJAX)
-      log(`[${label}] Clicking SEARCH button (selector="${searchSelector}")`);
+      // Click SEARCH — wait for navigation or AJAX settle
+      log(`[${label}] Clicking SEARCH (selector="${searchSelector}")`);
       onProgress?.(`Clicking SEARCH, waiting for results...`);
       const navPromise = page.waitForNavigation({ waitUntil: 'domcontentloaded', timeout: 12000 }).catch(() => null);
       const clicked = await page.evaluate((searchSel) => {
@@ -435,22 +620,23 @@ class LeadScraper {
         if (!btn) return 'NOT_FOUND';
         btn.scrollIntoView({ block: 'center' });
         btn.click();
-        return btn.textContent?.trim() || btn.value || 'clicked';
+        return (btn.textContent?.trim() || btn.value || 'clicked').slice(0, 40);
       }, searchSelector || '');
-      log(`[${label}] SEARCH button: ${clicked}`);
+      log(`[${label}] SEARCH click: "${clicked}"`);
       await navPromise;
-      log(`[${label}] Navigation/settle after SEARCH done`);
+      log(`[${label}] Page settled after SEARCH`);
 
-      // Extra wait + scroll for AJAX content
-      await new Promise(r => setTimeout(r, 2500));
+      // Extra wait + wait for cards to appear
+      await new Promise(r => setTimeout(r, 2000));
+      await this.waitForCards(page, 10000);
       onProgress?.(`Loading results...`);
       await this.scrollPage(page);
 
-      // Click LOAD MORE until done
+      // LOAD MORE
       onProgress?.(`Checking for LOAD MORE...`);
       await this.clickLoadMore(page, onProgress);
 
-      // Extract listings
+      // Extract
       onProgress?.(`Extracting dealer cards...`);
       const rawListings = await this.detectListings(page, label);
       await page.close();
@@ -461,9 +647,19 @@ class LeadScraper {
         return [];
       }
 
-      log(`[${label}] Extracted ${rawListings.length} dealers`);
+      log(`[${label}] Extracted ${rawListings.length} dealers (deepMode=${deepMode})`);
       onProgress?.(`Extracted ${rawListings.length} dealers`);
-      return rawListings.map(item => normaliseLead(item, { state: label, sourceUrl: url }));
+
+      let leads = rawListings.map(item => normaliseLead(item, { state: label, sourceUrl: url }));
+
+      // Deep scrape: visit each dealer's website for extra data
+      if (deepMode) {
+        onProgress?.(`Deep scanning ${leads.length} dealer websites...`);
+        leads = await this.deepScrapeLeads(leads, onProgress);
+        log(`[${label}] Deep scrape done`);
+      }
+
+      return leads;
     } catch (err) {
       log(`[${label}] ERROR: ${err.message}`);
       await page.close().catch(() => {});
@@ -472,26 +668,30 @@ class LeadScraper {
   }
 
   // ── Scrape one state page (link-based navigation) ─────────────────────────
-  async scrapeStatePage(stateLink, onProgress) {
+  async scrapeStatePage(stateLink, onProgress, deepMode = false) {
     const label = stateLink.label;
-    log(`[${label}] scrapeStatePage: ${stateLink.href}`);
+    log(`[${label}] scrapeStatePage: ${stateLink.href} (deepMode=${deepMode})`);
     onProgress?.(`Navigating to ${stateLink.href}`);
 
     const page = await this.openPage();
     try {
       await this.navigateAndWait(page, stateLink.href);
+      await this.waitForCards(page, 8000);
       onProgress?.(`Clicking LOAD MORE if present...`);
       await this.clickLoadMore(page, onProgress);
       onProgress?.(`Extracting dealer cards...`);
       const rawListings = await this.detectListings(page, label);
       await page.close();
 
-      if (!rawListings || !rawListings.length) {
-        log(`[${label}] No listings found`);
-        return [];
-      }
+      if (!rawListings || !rawListings.length) { log(`[${label}] No listings`); return []; }
       log(`[${label}] Extracted ${rawListings.length} dealers`);
-      return rawListings.map(item => normaliseLead(item, { state: label, sourceUrl: stateLink.href }));
+
+      let leads = rawListings.map(item => normaliseLead(item, { state: label, sourceUrl: stateLink.href }));
+      if (deepMode) {
+        onProgress?.(`Deep scanning ${leads.length} dealer websites...`);
+        leads = await this.deepScrapeLeads(leads, onProgress);
+      }
+      return leads;
     } catch (err) {
       log(`[${label}] ERROR: ${err.message}`);
       await page.close().catch(() => {});
@@ -499,8 +699,7 @@ class LeadScraper {
     }
   }
 
-  // ── Scrape a single arbitrary URL ─────────────────────────────────────────
-  // Returns { leads, filters } so the route can forward filter info to the client.
+  // ── Scrape a single URL — returns { leads, filters } ─────────────────────
   async scrapeUrl(rawUrl) {
     let url = rawUrl.trim();
     if (!url.startsWith('http://') && !url.startsWith('https://')) url = 'https://' + url;
@@ -515,24 +714,23 @@ class LeadScraper {
       if (rawListings && rawListings.length >= 2) {
         log(`scrapeUrl: listing page — ${rawListings.length} cards`);
         await page.close();
-        const leads = rawListings.map(item => ({
-          ...normaliseLead(item, { sourceUrl: url }),
-          isListingItem: true,
-        }));
-        return { leads, filters: null };
+        return {
+          leads: rawListings.map(item => ({ ...normaliseLead(item, { sourceUrl: url }), isListingItem: true })),
+          filters: null,
+        };
       }
 
-      // No listings — check for filter/search forms before falling back
-      log('scrapeUrl: no listings, checking for filter forms...');
+      // No listings found — check for filter/search forms
+      log('scrapeUrl: no listings, checking for filters...');
       const filters = await this.detectFilters(page);
       if (filters) {
-        log(`scrapeUrl: filter page detected (type=${filters.type}) — returning empty leads`);
+        log(`scrapeUrl: filter page detected (type=${filters.type})`);
         await page.close();
         return { leads: [], filters };
       }
 
-      // ── Single business fallback ─────────────────────────────────────────
-      log('scrapeUrl: single business fallback');
+      // Single business fallback
+      log('scrapeUrl: single-business fallback');
       const html = await page.content();
       const text = await page.evaluate(() => {
         document.querySelectorAll('script,style,noscript').forEach(e => e.remove());
@@ -541,8 +739,7 @@ class LeadScraper {
       await page.close();
 
       const $ = cheerio.load(html);
-      const meta       = this.extractMeta($);
-      const structured = this.extractStructuredData($);
+      const meta = this.extractMeta($), structured = this.extractStructuredData($);
       let emails = this.extractEmails(html, text);
       let phones = this.extractPhonesFromText(text);
       const social = this.extractSocialMedia($);
@@ -562,10 +759,9 @@ class LeadScraper {
             const $s = cheerio.load(sh);
             emails = [...new Set([...emails, ...this.extractEmails(sh, st)])];
             phones = [...new Set([...phones, ...this.extractPhonesFromText(st)])];
-            const ss = this.extractSocialMedia($s);
+            const ss = this.extractSocialMedia($s), sd = this.extractStructuredData($s);
             Object.keys(ss).forEach(k => { if (!social[k]) social[k] = ss[k]; });
-            const sd = this.extractStructuredData($s);
-            if (!structured.address && sd.address)       structured.address      = sd.address;
+            if (!structured.address && sd.address)          structured.address      = sd.address;
             if (!structured.businessName && sd.businessName) structured.businessName = sd.businessName;
             pagesScraped++;
           } catch(e) { await sp.close().catch(()=>{}); }
@@ -580,27 +776,16 @@ class LeadScraper {
       log(`scrapeUrl: single biz "${businessName}", ${emails.length} emails, ${phones.length} phones`);
       return {
         leads: [{
-          state: structured.state || '',
-          dealerName: businessName,
-          companyName: '',
-          city: structured.city || city || '',
-          locality,
-          pinCode: structured.postalCode || pinCode || '',
+          state: structured.state || '', dealerName: businessName, companyName: '',
+          city: structured.city || city || '', locality, pinCode: structured.postalCode || pinCode || '',
           address: structured.address || '',
-          phone: phones[0] || '',
-          phones: phones.slice(0, 8),
-          email: emails[0] || '',
-          emails: emails.slice(0, 10),
-          rating: null,
-          status: '',
-          services: [],
-          website: url,
+          phone: phones[0] || '', phones: phones.slice(0, 8),
+          email: emails[0] || '', emails: emails.slice(0, 10),
+          rating: null, status: '', services: [], website: url,
           socialMedia: social,
           description: structured.description || meta.description || '',
           openingHours: structured.openingHours || '',
-          sourceUrl: url,
-          isListingItem: false,
-          pagesScraped,
+          sourceUrl: url, isListingItem: false, pagesScraped,
           scrapedAt: new Date().toISOString(),
         }],
         filters: null,
@@ -611,7 +796,7 @@ class LeadScraper {
     }
   }
 
-  // ── Quick analysis: detect filters without full scrape ────────────────────
+  // ── Quick analyze: detect filters only ───────────────────────────────────
   async analyzeUrl(rawUrl) {
     let url = rawUrl.trim();
     if (!url.startsWith('http://') && !url.startsWith('https://')) url = 'https://' + url;
@@ -697,8 +882,8 @@ class LeadScraper {
 
   findSubPageLinks($, baseUrl) {
     const origin = new URL(baseUrl).origin;
-    const kw = ['contact','about','team','reach','connect','location','support'];
-    const links = new Set();
+    const kw     = ['contact','about','team','reach','connect','location','support'];
+    const links  = new Set();
     $('a[href]').each((_, el) => {
       const href = $(el).attr('href') || '';
       if (kw.some(k => ($(el).text() + href).toLowerCase().includes(k))) {

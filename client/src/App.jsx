@@ -1,12 +1,12 @@
 import { useState } from 'react';
 import axios from 'axios';
-import Header       from './components/Header';
-import ScrapeForm   from './components/ScrapeForm';
-import FilterPanel  from './components/FilterPanel';
-import StatsBar     from './components/StatsBar';
-import LeadCard     from './components/LeadCard';
+import Header        from './components/Header';
+import ScrapeForm    from './components/ScrapeForm';
+import FilterPanel   from './components/FilterPanel';
+import StatsBar      from './components/StatsBar';
+import LeadCard      from './components/LeadCard';
 import ExportButtons from './components/ExportButtons';
-import TableView    from './components/TableView';
+import TableView     from './components/TableView';
 
 export default function App() {
   const [leads, setLeads]                     = useState([]);
@@ -35,12 +35,10 @@ export default function App() {
       setLeads(data.results || []);
       setScrapeTime(((Date.now() - t0) / 1000).toFixed(1));
       setProgress('');
-
-      // Filters returned directly with the scrape response (filter-form pages)
+      // Filters returned directly — no need for a separate /analyze call
       if (data.filters) {
         setDetectedFilters(data.filters);
       } else if (urls.length === 1 && (!data.results || data.results.length <= 1)) {
-        // Fallback: background filter detection when we got very few results
         detectFilters(urls[0]);
       }
     } catch (err) {
@@ -51,7 +49,6 @@ export default function App() {
     }
   };
 
-  // Background filter detection (only used as a fallback)
   const detectFilters = async (url) => {
     try {
       const { data } = await axios.post('/api/analyze', { url });
@@ -59,46 +56,41 @@ export default function App() {
     } catch (_) {}
   };
 
-  // ── SSE streaming: scrape states one-by-one, push leads in real-time ────
-  const handleScrapeStates = async (items, filtersCtx) => {
+  // ── SSE streaming — accepts deepScrape flag from FilterPanel ────────────
+  const handleScrapeStates = async (items, filtersCtx, deepScrape = false) => {
     setStreamActive(true);
     setError('');
     setLeads([]);
     setProgress(`Starting — 0 / ${items.length} states`);
     setProgressDetail('');
-    const t0  = Date.now();
-    const acc = [];
-    let done  = 0;
+    const t0 = Date.now(), acc = [];
+    let done = 0;
 
     const isDropdown = filtersCtx?.type === 'dropdown';
     const body = isDropdown
       ? {
-          type:            'dropdown',
-          url:             lastUrl,
+          type: 'dropdown', url: lastUrl,
           stateSelector:    filtersCtx.stateSelector,
           stateSelectorCSS: filtersCtx.stateSelectorCSS,
           searchSelector:   filtersCtx.searchSelector,
-          stateOptions:     items,
+          stateOptions:     items, deepScrape,
         }
-      : { stateLinks: items };
+      : { stateLinks: items, deepScrape };
 
     try {
       const res = await fetch('/api/scrape-states-stream', {
-        method:  'POST',
+        method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body:    JSON.stringify(body),
+        body: JSON.stringify(body),
       });
-
       if (!res.ok) throw new Error(`Server error ${res.status}`);
 
-      const reader  = res.body.getReader();
-      const decoder = new TextDecoder();
+      const reader = res.body.getReader(), decoder = new TextDecoder();
       let buf = '';
 
       while (true) {
-        const { done: streamDone, value } = await reader.read();
-        if (streamDone) break;
-
+        const { done: sd, value } = await reader.read();
+        if (sd) break;
         buf += decoder.decode(value, { stream: true });
         const parts = buf.split('\n\n');
         buf = parts.pop();
@@ -108,7 +100,6 @@ export default function App() {
           if (!line) continue;
           try {
             const ev = JSON.parse(line.slice(6));
-
             if (ev.type === 'start') {
               setProgress(`[${ev.index}/${ev.total}] ${ev.state}`);
               setProgressDetail('Starting…');
@@ -126,10 +117,8 @@ export default function App() {
               setProgressDetail(ev.error);
             } else if (ev.type === 'done') {
               setScrapeTime(((Date.now() - t0) / 1000).toFixed(0));
-              setProgress('');
-              setProgressDetail('');
-              setDetectedFilters(null);
-              setStreamActive(false);
+              setProgress(''); setProgressDetail('');
+              setDetectedFilters(null); setStreamActive(false);
             } else if (ev.type === 'fatal') {
               throw new Error(ev.error);
             }
@@ -139,9 +128,7 @@ export default function App() {
     } catch (err) {
       setError('State scraping failed: ' + err.message);
     } finally {
-      setStreamActive(false);
-      setProgress('');
-      setProgressDetail('');
+      setStreamActive(false); setProgress(''); setProgressDetail('');
     }
   };
 
@@ -162,32 +149,28 @@ export default function App() {
           <div className="p-4 bg-red-950 border border-red-700 rounded-xl text-red-300 text-sm">{error}</div>
         )}
 
-        {/* Spinner + live progress */}
+        {/* Spinner + dual-line progress */}
         {busy && (
           <div className="flex flex-col items-center justify-center py-16 gap-3">
             <div className="w-12 h-12 border-4 border-indigo-500 border-t-transparent rounded-full animate-spin" />
-            {progress && (
-              <p className="text-slate-300 text-sm font-medium text-center max-w-lg">{progress}</p>
-            )}
-            {progressDetail && (
-              <p className="text-slate-500 text-xs text-center max-w-lg animate-pulse">{progressDetail}</p>
-            )}
-            {!progress && !progressDetail && (
-              <p className="text-slate-400 text-sm">Scraping and extracting leads…</p>
-            )}
+            {progress    && <p className="text-slate-200 text-sm font-medium text-center max-w-lg">{progress}</p>}
+            {progressDetail && <p className="text-slate-500 text-xs text-center max-w-lg animate-pulse">{progressDetail}</p>}
+            {!progress && !progressDetail && <p className="text-slate-400 text-sm">Scraping and extracting leads…</p>}
             {streamActive && leads.length > 0 && (
               <p className="text-indigo-400 text-xs">{leads.length} leads collected so far</p>
             )}
           </div>
         )}
 
-        {/* Filter panel — shown when a search-form page is detected */}
+        {/* Filter panel */}
         {!busy && detectedFilters && (
-          <FilterPanel
-            filters={detectedFilters}
-            onScrapeStates={handleScrapeStates}
-            analyzing={false}
-          />
+          <FilterPanel filters={detectedFilters} onScrapeStates={handleScrapeStates} />
+        )}
+
+        {!busy && detectedFilters && leads.length === 0 && (
+          <p className="text-center text-slate-500 text-sm py-6">
+            Select states above and click <span className="text-white font-medium">Scrape</span> to extract leads.
+          </p>
         )}
 
         {/* Results */}
@@ -207,9 +190,7 @@ export default function App() {
                   {successLeads.length} {isListingPage ? 'Dealer Listings' : 'Leads'} Extracted
                 </h2>
                 {isListingPage && (
-                  <p className="text-xs text-indigo-400 mt-0.5">
-                    Directory page — each dealer extracted individually
-                  </p>
+                  <p className="text-xs text-indigo-400 mt-0.5">Directory page — each dealer extracted individually</p>
                 )}
               </div>
               <div className="flex items-center gap-2 flex-wrap">
@@ -230,13 +211,6 @@ export default function App() {
               : <TableView leads={successLeads} />
             }
           </>
-        )}
-
-        {/* Prompt user to scrape state-wise when filter form detected but no leads yet */}
-        {!busy && detectedFilters && leads.length === 0 && (
-          <div className="text-center py-8 text-slate-500 text-sm">
-            Select states above and click <span className="text-white font-medium">Scrape</span> to extract dealer leads.
-          </div>
         )}
       </main>
     </div>

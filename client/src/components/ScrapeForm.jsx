@@ -36,7 +36,7 @@ export default function ScrapeForm({ onScrape, loading }) {
           type="button"
           onClick={() => setMode('single')}
           className={`px-4 py-1.5 rounded-lg text-sm font-medium transition-colors ${
-            mode === 'single' ? 'bg-indigo-600 text-white' : 'bg-slate-800 text-slate-400 hover:text-white'
+            mode === 'single' ? 'bg-cyan-600 text-white' : 'bg-slate-800 text-slate-400 hover:text-white'
           }`}
         >
           Single URL
@@ -45,7 +45,7 @@ export default function ScrapeForm({ onScrape, loading }) {
           type="button"
           onClick={() => setMode('batch')}
           className={`px-4 py-1.5 rounded-lg text-sm font-medium transition-colors ${
-            mode === 'batch' ? 'bg-indigo-600 text-white' : 'bg-slate-800 text-slate-400 hover:text-white'
+            mode === 'batch' ? 'bg-cyan-600 text-white' : 'bg-slate-800 text-slate-400 hover:text-white'
           }`}
         >
           Batch (up to 10 URLs)
@@ -61,7 +61,7 @@ export default function ScrapeForm({ onScrape, loading }) {
               value={singleUrl}
               onChange={(e) => setSingleUrl(e.target.value)}
               placeholder="https://example.com  or  example.com"
-              className="w-full bg-slate-800 border border-slate-700 rounded-lg px-4 py-3 text-white placeholder-slate-500 focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:border-transparent"
+              className="w-full bg-slate-800 border border-slate-700 rounded-lg px-4 py-3 text-white placeholder-slate-500 focus:outline-none focus:ring-2 focus:ring-cyan-500 focus:border-transparent"
               disabled={loading}
             />
           </div>
@@ -75,7 +75,7 @@ export default function ScrapeForm({ onScrape, loading }) {
               onChange={(e) => setBatchUrls(e.target.value)}
               placeholder={`https://business1.com\nhttps://business2.com\nhttps://business3.com`}
               rows={6}
-              className="w-full bg-slate-800 border border-slate-700 rounded-lg px-4 py-3 text-white placeholder-slate-500 focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:border-transparent font-mono text-sm resize-none"
+              className="w-full bg-slate-800 border border-slate-700 rounded-lg px-4 py-3 text-white placeholder-slate-500 focus:outline-none focus:ring-2 focus:ring-cyan-500 focus:border-transparent font-mono text-sm resize-none"
               disabled={loading}
             />
             <p className="text-slate-500 text-xs mt-1">

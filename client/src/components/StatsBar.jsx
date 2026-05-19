@@ -8,7 +8,7 @@ const Stat = ({ label, value, color }) => (
 export default function StatsBar({ leadsCount, emailsCount, phonesCount, scrapeTime, isListingPage }) {
   return (
     <div className="flex flex-wrap gap-3">
-      <Stat label={isListingPage ? 'Dealers' : 'Leads'}  value={leadsCount}   color="text-indigo-400" />
+      <Stat label={isListingPage ? 'Dealers' : 'Leads'}  value={leadsCount}   color="text-cyan-400" />
       <Stat label="Emails"                                value={emailsCount}  color="text-emerald-400" />
       <Stat label="Phones"                                value={phonesCount}  color="text-yellow-400" />
       {scrapeTime && <Stat label="Seconds"                value={scrapeTime}   color="text-slate-300" />}

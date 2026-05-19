@@ -25,12 +25,12 @@ export default function FilterPanel({ filters, onScrapeStates }) {
   const count = selected.size || stateItems.length;
 
   return (
-    <div className="card border-indigo-900/50 bg-indigo-950/20 space-y-4">
+    <div className="card border-cyan-900/50 bg-cyan-950/20 space-y-4">
       <div className="flex items-start justify-between gap-4">
         <div>
-          <h3 className="font-semibold text-indigo-300 flex items-center gap-2">
+          <h3 className="font-semibold text-cyan-300 flex items-center gap-2">
             State-wise Data Detected
-            <span className="badge bg-indigo-900 text-indigo-300 border border-indigo-700 text-xs">
+            <span className="badge bg-cyan-900 text-cyan-300 border border-cyan-700 text-xs">
               {stateItems.length} states
             </span>
             {isDropdown && (
@@ -45,7 +45,7 @@ export default function FilterPanel({ filters, onScrapeStates }) {
 
       {/* Select all */}
       <label className="flex items-center gap-2 cursor-pointer text-sm text-slate-300 w-fit">
-        <input type="checkbox" checked={allSel} onChange={toggleAll} className="w-4 h-4 accent-indigo-500" />
+        <input type="checkbox" checked={allSel} onChange={toggleAll} className="w-4 h-4 accent-cyan-500" />
         {allSel ? 'Deselect all' : 'Select all states'}
         <span className="text-slate-500 text-xs">({selected.size} / {stateItems.length})</span>
       </label>
@@ -57,8 +57,8 @@ export default function FilterPanel({ filters, onScrapeStates }) {
           return (
             <button key={i} onClick={() => toggle(key)}
               className={`px-3 py-1 rounded-lg text-xs font-medium border transition-colors ${
-                on ? 'bg-indigo-600 border-indigo-500 text-white'
-                   : 'bg-slate-800 border-slate-700 text-slate-300 hover:border-indigo-600 hover:text-white'
+                on ? 'bg-cyan-600 border-cyan-500 text-white'
+                   : 'bg-slate-800 border-slate-700 text-slate-300 hover:border-cyan-600 hover:text-white'
               }`}>
               {getLabel(item)}
             </button>

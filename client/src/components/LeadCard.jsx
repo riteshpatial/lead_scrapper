@@ -64,7 +64,7 @@ export default function LeadCard({ lead, index }) {
             <p className="text-slate-400 text-xs mt-0.5 truncate">{lead.companyName}</p>
           )}
         </div>
-        <span className="badge bg-indigo-950 text-indigo-400 border border-indigo-800 shrink-0 text-xs">#{index + 1}</span>
+        <span className="badge bg-cyan-950 text-cyan-400 border border-cyan-800 shrink-0 text-xs">#{index + 1}</span>
       </div>
 
       {/* ── Rating + Services ── */}
@@ -113,7 +113,7 @@ export default function LeadCard({ lead, index }) {
       {/* ── Website ── */}
       {lead.website && lead.website !== lead.sourceUrl && (
         <a href={lead.website} target="_blank" rel="noreferrer"
-          className="text-indigo-400 hover:text-indigo-300 text-xs hover:underline truncate block">
+          className="text-cyan-400 hover:text-cyan-300 text-xs hover:underline truncate block">
           🌐 {lead.website}
         </a>
       )}

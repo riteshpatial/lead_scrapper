@@ -152,12 +152,12 @@ export default function App() {
         {/* Spinner + dual-line progress */}
         {busy && (
           <div className="flex flex-col items-center justify-center py-16 gap-3">
-            <div className="w-12 h-12 border-4 border-indigo-500 border-t-transparent rounded-full animate-spin" />
+            <div className="w-12 h-12 border-4 border-cyan-500 border-t-transparent rounded-full animate-spin" />
             {progress    && <p className="text-slate-200 text-sm font-medium text-center max-w-lg">{progress}</p>}
             {progressDetail && <p className="text-slate-500 text-xs text-center max-w-lg animate-pulse">{progressDetail}</p>}
             {!progress && !progressDetail && <p className="text-slate-400 text-sm">Scraping and extracting leads…</p>}
             {streamActive && leads.length > 0 && (
-              <p className="text-indigo-400 text-xs">{leads.length} leads collected so far</p>
+              <p className="text-cyan-400 text-xs">{leads.length} leads collected so far</p>
             )}
           </div>
         )}
@@ -190,7 +190,7 @@ export default function App() {
                   {successLeads.length} {isListingPage ? 'Dealer Listings' : 'Leads'} Extracted
                 </h2>
                 {isListingPage && (
-                  <p className="text-xs text-indigo-400 mt-0.5">Directory page — each dealer extracted individually</p>
+                  <p className="text-xs text-cyan-400 mt-0.5">Directory page — each dealer extracted individually</p>
                 )}
               </div>
               <div className="flex items-center gap-2 flex-wrap">
@@ -198,7 +198,7 @@ export default function App() {
                 <div className="flex rounded-lg overflow-hidden border border-slate-700 shrink-0">
                   {['cards','table'].map(v => (
                     <button key={v} onClick={() => setView(v)}
-                      className={`px-3 py-1.5 text-xs capitalize transition-colors ${view === v ? 'bg-indigo-600 text-white' : 'bg-slate-800 text-slate-400 hover:text-white'}`}>
+                      className={`px-3 py-1.5 text-xs capitalize transition-colors ${view === v ? 'bg-cyan-600 text-white' : 'bg-slate-800 text-slate-400 hover:text-white'}`}>
                       {v}
                     </button>
                   ))}

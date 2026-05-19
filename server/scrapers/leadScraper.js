@@ -1,5 +1,13 @@
-const puppeteer = require('puppeteer');
-const cheerio   = require('cheerio');
+const puppeteer  = require('puppeteer');
+const cheerio    = require('cheerio');
+const { execSync } = require('child_process');
+
+function findChromium() {
+  if (process.env.PUPPETEER_EXECUTABLE_PATH) return process.env.PUPPETEER_EXECUTABLE_PATH;
+  try { return execSync('which chromium').toString().trim(); } catch (_) {}
+  try { return execSync('which chromium-browser').toString().trim(); } catch (_) {}
+  return puppeteer.executablePath();
+}
 
 const EMAIL_REGEX = /[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}/gi;
 const IGNORE_EMAIL_DOMAINS  = ['example.com','test.com','domain.com','yourdomain.com','sentry.io','wixpress.com','w3.org'];
@@ -75,8 +83,10 @@ class LeadScraper {
     log('Launching browser...');
     this.browser = await puppeteer.launch({
       headless: true,
+      executablePath: findChromium(),
       args: ['--no-sandbox','--disable-setuid-sandbox','--disable-dev-shm-usage',
-             '--disable-accelerated-2d-canvas','--no-first-run','--disable-gpu'],
+             '--disable-accelerated-2d-canvas','--no-first-run','--disable-gpu',
+             '--single-process','--no-zygote'],
     });
     log('Browser ready.');
   }

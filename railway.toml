@@ -1,5 +1,2 @@
 [build]
-buildCommand = "cd server && npm install && cd ../client && npm install && npm run build"
-
-[deploy]
-startCommand = "cd server && node server.js"
+builder = "dockerfile"
